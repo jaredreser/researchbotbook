@@ -15,6 +15,17 @@ PYTHONPATH=src python3 -m researchbotbook synthesize 1
 PYTHONPATH=src python3 -m researchbotbook problem show 1
 ```
 
+To use LLM-backed reviewer and synthesizer agents, set an OpenAI API key and add
+`--llm`:
+
+```bash
+export OPENAI_API_KEY=...
+PYTHONPATH=src python3 -m researchbotbook evaluate --llm
+PYTHONPATH=src python3 -m researchbotbook synthesize 1 --llm
+```
+
+Set `OPENAI_MODEL` or pass `--model` to choose a different model.
+
 The default database path is `researchbotbook.sqlite3`. Override it with:
 
 ```bash
