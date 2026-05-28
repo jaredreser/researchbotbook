@@ -1,26 +1,33 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import Any
 
 from .models import ContributionStatus, utc_now
+from .llm import LLMClient, clamp_score, parse_json_object
 
 
 PROMOTION_THRESHOLD = 0.68
 
 
-def evaluate_inbox(conn: sqlite3.Connection) -> int:
+def evaluate_inbox(conn: sqlite3.Connection, llm: LLMClient | None = None) -> int:
     rows = conn.execute(
         """
-        SELECT id, body, sources
-        FROM contributions
-        WHERE status = ?
-        ORDER BY id
+        SELECT c.id, c.kind, c.body, c.sources, p.title, p.scope, p.constraints
+        FROM contributions c
+        JOIN research_problems p ON p.id = c.problem_id
+        WHERE c.status = ?
+        ORDER BY c.id
         """,
         (ContributionStatus.INBOX.value,),
     ).fetchall()
 
     for row in rows:
-        scores = score_text(row["body"], row["sources"])
+        scores = (
+            evaluate_contribution_with_llm(row, llm)
+            if llm is not None
+            else score_text(row["body"], row["sources"])
+        )
         conn.execute(
             """
             INSERT INTO evaluations
@@ -32,7 +39,7 @@ def evaluate_inbox(conn: sqlite3.Connection) -> int:
             """,
             (
                 row["id"],
-                "deterministic_reviewer",
+                str(scores["evaluator_role"]),
                 scores["relevance"],
                 scores["novelty"],
                 scores["clarity"],
@@ -80,10 +87,57 @@ def score_text(body: str, sources: str) -> dict[str, float | str]:
         "compression": compression,
         "mean": mean,
         "notes": "Deterministic baseline score; replace with role-specific LLM evaluators.",
+        "evaluator_role": "deterministic_reviewer",
     }
 
 
-def synthesize_problem(conn: sqlite3.Connection, problem_id: int) -> int:
+def evaluate_contribution_with_llm(
+    row: sqlite3.Row, llm: LLMClient
+) -> dict[str, float | str]:
+    instructions = (
+        "You are ResearchBotBook's critic-verifier agent. Evaluate one typed "
+        "research contribution for downstream usefulness, not popularity. "
+        "Return only JSON with keys: relevance, novelty, clarity, grounding, "
+        "compression, notes. Scores must be numbers from 0 to 1. Notes must be "
+        "one concise sentence that names the strongest reason for the score."
+    )
+    prompt = f"""Research problem: {row['title']}
+Scope: {row['scope']}
+Known constraints: {row['constraints']}
+
+Contribution type: {row['kind']}
+Contribution body:
+{row['body']}
+
+Sources: {row['sources'] or 'none supplied'}
+"""
+    parsed = parse_json_object(llm.complete(instructions, prompt))
+    scores = {
+        "relevance": clamp_score(parsed.get("relevance")),
+        "novelty": clamp_score(parsed.get("novelty")),
+        "clarity": clamp_score(parsed.get("clarity")),
+        "grounding": clamp_score(parsed.get("grounding")),
+        "compression": clamp_score(parsed.get("compression")),
+        "notes": str(parsed.get("notes", "LLM evaluator returned no notes.")),
+        "evaluator_role": "llm_critic_verifier",
+    }
+    scores["mean"] = mean_score(scores)
+    return scores
+
+
+def mean_score(scores: dict[str, Any]) -> float:
+    return (
+        float(scores["relevance"])
+        + float(scores["novelty"])
+        + float(scores["clarity"])
+        + float(scores["grounding"])
+        + float(scores["compression"])
+    ) / 5
+
+
+def synthesize_problem(
+    conn: sqlite3.Connection, problem_id: int, llm: LLMClient | None = None
+) -> int:
     problem = conn.execute(
         "SELECT * FROM research_problems WHERE id = ?", (problem_id,)
     ).fetchone()
@@ -111,7 +165,11 @@ def synthesize_problem(conn: sqlite3.Connection, problem_id: int) -> int:
         (problem_id,),
     ).fetchone()
     version = int(latest["version"] or 0) + 1
-    body = build_synthesis(problem["title"], contributions)
+    body = (
+        build_synthesis_with_llm(problem, contributions, llm)
+        if llm is not None
+        else build_synthesis(problem["title"], contributions)
+    )
     source_ids = ",".join(str(row["id"]) for row in contributions)
 
     cur = conn.execute(
@@ -161,3 +219,36 @@ def build_synthesis(title: str, contributions: list[sqlite3.Row]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def build_synthesis_with_llm(
+    problem: sqlite3.Row, contributions: list[sqlite3.Row], llm: LLMClient
+) -> str:
+    instructions = (
+        "You are ResearchBotBook's synthesizer agent. Produce a concise, "
+        "versioned canonical synthesis from reviewed contributions. Preserve "
+        "uncertainty, distinguish evidence from speculation, elevate useful "
+        "negative results, and end with concrete open questions. Return "
+        "Markdown only."
+    )
+    items = "\n".join(
+        f"- Contribution {row['id']} [{row['kind']}]: {row['body']}"
+        for row in contributions
+    )
+    prompt = f"""Research problem: {problem['title']}
+Scope: {problem['scope']}
+Assumptions: {problem['assumptions']}
+Known constraints: {problem['constraints']}
+
+Reviewed contributions:
+{items}
+
+Write the canonical synthesis with these sections:
+# {problem['title']}
+## Current Best Understanding
+## Evidence and Constraints
+## Useful Refutations or Negative Results
+## Reusable Concepts
+## Open Questions
+"""
+    return llm.complete(instructions, prompt).strip()
