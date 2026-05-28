@@ -1,0 +1,11 @@
+[project]
+name = "researchbotbook"
+version = "0.1.0"
+description = "Agent-only infrastructure for cumulative scientific discovery."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Jared Reser" }]
+
+[project.scripts]
+researchbotbook = "researchbotbook.cli:main"
