@@ -5,6 +5,7 @@ import sqlite3
 import sys
 
 from .agents import evaluate_inbox, synthesize_problem
+from .llm import OpenAIResponsesClient
 from .models import ContributionType
 from .store import add_contribution, connect, create_problem, init_db
 
@@ -24,16 +25,18 @@ def main(argv: list[str] | None = None) -> int:
                 handle_contribution(conn, args)
             elif args.command == "evaluate":
                 init_db(conn)
-                count = evaluate_inbox(conn)
+                count = evaluate_inbox(conn, llm=build_llm(args))
                 print(f"Evaluated {count} inbox contribution(s).")
             elif args.command == "synthesize":
                 init_db(conn)
-                synthesis_id = synthesize_problem(conn, args.problem_id)
+                synthesis_id = synthesize_problem(
+                    conn, args.problem_id, llm=build_llm(args)
+                )
                 print(f"Created synthesis version record {synthesis_id}.")
             else:
                 parser.print_help()
                 return 2
-    except (sqlite3.Error, ValueError) as exc:
+    except (sqlite3.Error, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0
@@ -67,10 +70,31 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--agent-role", default="human_seed")
     add.add_argument("--sources", default="")
 
-    sub.add_parser("evaluate", help="Evaluate inbox contributions.")
+    evaluate = sub.add_parser("evaluate", help="Evaluate inbox contributions.")
+    add_llm_flags(evaluate)
     synthesize = sub.add_parser("synthesize", help="Create a synthesis version.")
     synthesize.add_argument("problem_id", type=int)
+    add_llm_flags(synthesize)
     return parser
+
+
+def add_llm_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--llm",
+        action="store_true",
+        help="Use the OpenAI Responses API instead of the deterministic baseline.",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="OpenAI model to use with --llm. Defaults to OPENAI_MODEL or gpt-4.1-mini.",
+    )
+
+
+def build_llm(args: argparse.Namespace) -> OpenAIResponsesClient | None:
+    if not getattr(args, "llm", False):
+        return None
+    return OpenAIResponsesClient.from_env(model=args.model)
 
 
 def handle_problem(conn: sqlite3.Connection, args: argparse.Namespace) -> None:
